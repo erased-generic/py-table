@@ -66,17 +66,27 @@ public class TableFrame extends JFrame {
     }
 
     // Prints input to python process standard input, returns its standard output
-    private String executePrint(Writer writer, BufferedReader reader, String input) throws IOException {
-        writer.write(input);
+    private String executePrint(Writer writer, BufferedReader reader, BufferedReader error) throws IOException {
+        writer.write("\n");
         writer.flush();
         StringBuilder accum = new StringBuilder();
         // Wait for python to print
+        long startTime = System.currentTimeMillis();
         while (!reader.ready()) {
+            long elapsed = (System.currentTimeMillis() - startTime) / 1000;
+            if (elapsed >= 5) {
+                // Error occurred, read error
+                String s;
+                while ((s = error.readLine()) != null) {
+                    accum.append(s).append('\n');
+                }
+                exitWithError(accum.toString());
+            }
         }
         // Read all
         boolean isFirst = true;
         while (reader.ready()) {
-            // every repeated line break creates empty line, read it and append line break
+            // every line break creates empty line, read it and append line break
             if (!isFirst) {
                 reader.readLine();
                 accum.append('\n');
@@ -112,32 +122,38 @@ public class TableFrame extends JFrame {
     }
 
     // Executes code.py with specific .csv file name and python interpreter
-    private JTable executeCode(String csvName, String pythonPath) throws IOException {
+    private JTable executeCode(String csvName, String pythonPath) throws IOException, InterruptedException {
         log("Parsing input table...");
         Process proc = Runtime.getRuntime().exec(new String[] { pythonPath, "code.py", csvName });
         try(
                 BufferedReader reader = new BufferedReader(new InputStreamReader(proc.getInputStream()));
-                BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(proc.getOutputStream()))
+                BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(proc.getOutputStream()));
+                BufferedReader error = new BufferedReader(new InputStreamReader(proc.getErrorStream()))
             ) {
-            // Read table size
-            String s = reader.readLine();
-            int h = Integer.parseInt(s);
-            s = reader.readLine();
-            int w = Integer.parseInt(s);
-            Vector<Vector<String>> data = new Vector<>(h);
+            // Read table width
+            int w = Integer.parseInt(executePrint(writer, reader, error));
+            Vector<Vector<String>> data = new Vector<>();
             Vector<String> columnNames = new Vector<>();
             // Read column names
-            for (int i = 0; i < w; i++) {
-                String colName = executePrint(writer, reader, "\n");
+            for (int col = 0; col < w; col++) {
+                String colName = executePrint(writer, reader, error);
                 columnNames.add(colName);
             }
-            // Read cells
-            for (int i = 0; i < h; i++) {
-                data.add(new Vector<>(w));
-                for (int j = 0; j < w; j++) {
-                    data.get(i).add(executePrint(writer, reader, "\n"));
+            // Read chunks
+            int row = 0;
+            while (true) {
+                int chunkH = Integer.parseInt(executePrint(writer, reader, error));
+                if (chunkH == -1) {
+                    break;
+                }
+                for (int chunkRow = 0; chunkRow < chunkH; chunkRow++, row++) {
+                    data.add(new Vector<>(w));
+                    for (int col = 0; col < w; col++) {
+                        data.get(row).add(executePrint(writer, reader, error));
+                    }
                 }
             }
+            proc.waitFor();
             log("Done!");
             // Create new table
             JTable table = new JTable(new DefaultTableModel(data, columnNames) {
